@@ -1,0 +1,54 @@
+parameters:
+  # The glob pattern to be passed to `go test` for running terratest tests
+  - name: go_test_files
+    default: './...'
+
+  # The path where the go mod dependencies live
+  - name: go_test_directory
+    default: 'test/'
+
+  # Timeout for go tests
+  - name: go_test_timeout
+    default: '30m'
+
+  # A noop flag that can disable this stage
+  - name: dryrun
+    default: false
+
+  # Target specific tests. Defaults to running all tests
+  - name: TestAll
+    default: false
+
+  # List of environments to test
+  - name: "environments"
+    type: object
+    default: {}
+
+
+
+stages:
+  - ${{ each env in parameters.environments }}:
+    - stage: Test${{ env }}
+      condition: and(eq(${{ parameters.dryrun }}, false), eq(variables['Build.SourceBranch'], 'refs/heads/${{ env }}'))
+      jobs:
+        - job: RunGoTests
+          container:
+            image: acrmodelanonprod.azurecr.io/ado-builder-images/docker-linux-terraform-agent:latest
+            endpoint: 'ADO-SE-Docker-Registry-Example Spoke CentralUS ModelA SharedNonProd'
+          steps:
+            - script: |
+                export ARM_CLIENT_ID=$(AzureClientId)
+                export ARM_CLIENT_SECRET=$(AzureClientSecret)
+                export ARM_SUBSCRIPTION_ID=$(AzureSubscriptionId)
+                export ARM_TENANT_ID=$(AzureTenantId)
+                az login --service-principal -u $(AzureClientId) -p $(AzureClientSecret) --tenant $(AzureTenantId)
+                az account set --subscription $(AzureSubscriptionId)
+                cd ${{ parameters.go_test_directory }}
+
+                if [ "${{ parameters.TestAll }}" = "true" ]; then
+                  go test -v ${{ parameters.go_test_files }} --timeout ${{ parameters.go_test_timeout }}
+                else
+                  go test -v ${{ parameters.go_test_files }} -run='^(?i).*${{ env }}$' --timeout ${{ parameters.go_test_timeout }}
+                fi
+              displayName: 'Run Go Tests for ${{ env }} environment'
+

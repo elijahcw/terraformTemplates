@@ -1,0 +1,31 @@
+## Used to perform a dryrun on available templates
+
+stages:
+  - template: terraform-templates/validate.yml
+    parameters:
+      dryrun: true
+      environments:
+        - "dryrun"
+
+  - template: terraform-templates/plan.yml
+    parameters:
+      dryrun: true 
+      environments:
+        - "dryrun"
+
+  - template: terraform-templates/apply.yml
+    parameters:
+      dryrun: true 
+      environments:
+        - "dryrun"
+
+  - template: terraform-templates/destroy.yml
+    parameters:
+      dryrun: true 
+      environment: "dryrun"
+
+  - template: testing-templates/go-test.yml
+    parameters:
+      dryrun: true 
+      environments: 
+        - "dryrun"

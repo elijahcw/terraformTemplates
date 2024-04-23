@@ -1,0 +1,71 @@
+parameters:
+  - name: environment
+    type: string
+
+  - name: confirm_destroy
+    type: boolean
+    default: false
+
+  - name: confirm_destroy_repo_name
+    type: string
+    default: ' type out the repo name here to confirm '
+
+  - name: dryrun
+    default: false
+   
+  - name: terraform_version
+    default: '0.13.4'
+
+
+
+stages:
+  - stage: Destroy${{parameters.environment}}
+    condition: and(eq(${{ parameters.dryrun }}, false), eq(${{ parameters.confirm_destroy }}, true), eq(variables['Build.SourceBranch'], 'refs/heads/${{parameters.environment}}'))
+    jobs:
+
+      - job: RepoName
+        steps:
+          - bash: |
+              echo "##vso[task.setvariable variable=repoName;isOutput=true]$(Build.Repository.Name)"
+            name: repoName
+
+      - deployment: IacSDLCDeploy${{ parameters.environment }}
+        dependsOn: RepoName
+        condition: and( eq(${{ parameters.confirm_destroy }}, true), eq( dependencies.repoName.outputs['RepoName.repoName'], '${{ parameters.confirm_destroy_repo_name }}' ),  eq(variables['Build.SourceBranch'], 'refs/heads/${{parameters.environment}}'))
+        displayName: Destroy${{ parameters.environment }}
+        environment: 'iac-sdlc-${{ parameters.environment }}'
+        container:
+          image: acrmodelanonprod.azurecr.io/ado-builder-images/docker-linux-terraform-agent:latest
+          endpoint: "ADO-SE-Docker-Registry-Example Spoke CentralUS ModelA SharedNonProd"
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+
+## TODO: uncomment once ssh key is added to keyvault
+#               - task: InstallSSHKey@0
+#                 inputs:
+#                    knownHostsEntry: $(known_host_entry)
+#                    sshPublicKey: $(ssh_pub_key)
+#                    sshKeySecureFile: 'Example_ado_pipeline.key'
+
+                - script: |
+                    echo "credentials \"tfe.Example.com\" { token = \"$TFE_TOKEN\" }" >> ~/.terraformrc
+                  displayName: Setup TFE Credentials
+                  env:
+                    TFE_TOKEN: $(TFETeamToken)
+
+
+                - script: |
+                    tfenv use ${{ parameters.terraform_version }}
+                    cd environments/${{parameters.environment}}
+                    terragrunt validate
+                  displayName: 'Terragrunt Validate'
+
+                - script: |
+                    tfenv use ${{ parameters.terraform_version }}
+                    cd environments/${{parameters.environment}}
+                    terragrunt destroy
+                  displayName: 'Terragrunt Destory'
+                  condition: succeeded()
+

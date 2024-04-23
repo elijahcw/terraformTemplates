@@ -1,0 +1,139 @@
+# Verification for testing terraform
+#
+# This stage performs a few checks
+#   * check to make sure that all terraform is compliant with terraform fmt
+#   * check to make sure that terraform validate succeeds
+#   * run terragrunt validate/plan on every given environment
+
+parameters:
+
+  # The directory where the terraform lives
+  - name: terraform_source_path
+    default: 'terraform'
+
+  # A noop flag that can disable this stage
+  - name: dryrun
+    default: false
+
+  - name: terraform_version 
+    default: '0.13.4'
+
+  # List of environments to validate
+  - name: "environments"
+    type: object
+    default: {}
+
+  # Authorize the Destruction of Terraform provisioned resources
+  - name: 'authorizeDestructionOfResources'
+    type: boolean
+    default: false
+  
+  # Using TFE Workspace. Set to false if not using TFE for development purposes
+  - name: 'usingTFEWorkspace'
+    type: boolean
+    default: true 
+
+
+
+stages:
+  - ${{ each env in parameters.environments }}:
+    - stage: Plan_${{ env }}
+      condition: and(eq(${{ parameters.dryrun }}, false), eq(variables['Build.SourceBranch'], 'refs/heads/${{ env }}'))
+      jobs:
+        - job: TerraformPlan
+          container:
+            image: acrmodelanonprod.azurecr.io/ado-builder-images/docker-linux-terraform-agent:latest
+            endpoint: 'ADO-SE-Docker-Registry-Example Spoke CentralUS ModelA SharedNonProd'
+          steps:
+
+## TODO: Uncomment after we publish ssh key
+#           - task: InstallSSHKey@0
+#             inputs:
+#               knownHostsEntry: $(known_host_entry)
+#               sshPublicKey: $(ssh_pub_key)
+#               sshKeySecureFile: 'Example_ado_pipeline.key'
+
+               ## Write TFE_TOKEN to terraformrc for authentication
+              - script: |
+                  echo "credentials \"tfe.Example.com\" { token = \"$TFE_TOKEN\" }" >> ~/.terraformrc
+                displayName: Setup TFE Credentials
+                env:
+                  TFE_TOKEN: $(TFETeamToken)
+
+              - script: |
+                  resourceChanges=false
+                  resourceDestructionDetected=false
+                  tfenv use ${{ parameters.terraform_version }}
+      
+                  cd environments/${{ env }}
+                  echo "##[command]terragrunt plan -input=false"
+                  terragrunt plan -input=false -no-color | tee $TFPLAN_NAME.tfplan 
+                  
+                  status=${PIPESTATUS[0]}
+                  if [ $status -ne 0 ]
+                  then
+                    "##vso[task.logissue type=error]*****ERROR: terragrunt plan for ${{ env }} failed. Please consult logs for more information.*****"
+                    exit $status
+                  fi
+                  
+                  if  ! grep -q "No changes. Infrastructure is up-to-date" $TFPLAN_NAME.tfplan;
+                  then
+                    status=0
+                    resourceChanges=true
+
+                    echo "##vso[task.logissue type=warning]*****Carefully review the diff (Build Summary -> Extensions) for changes that will be applied to the environment before approving.*****"
+                    
+                    if [ "$USING_TFE_WORKSPACE" = "True" ]
+                    then
+                      echo "USING TFE WORKSPACE"
+                      TFE_PLAN_URL=$(grep -Eo 'https://tfe.Example.com\S+' $TFPLAN_NAME.tfplan)
+                      TFE_WORKSPACE_URL=$(echo $TFE_PLAN_URL | sed 's/\/runs.*//g')
+                      echo "##vso[task.logissue type=warning]*****A link to the speculative plan in Terraform Enterprise is also available in the Extensions tab.*****"
+                      echo "View current and past terraform executions for ${{ env }} in your [Terraform Enterprise Workspace]($TFE_WORKSPACE_URL)" > $TFPLAN_SUMMARY_NAME.md
+                      echo "a [SPECULATIVE PLAN]($TFE_PLAN_URL) can also be found in Terraform Enterprise" >> $TFPLAN_SUMMARY_NAME.md
+                      echo \`\`\`diff >> $TFPLAN_SUMMARY_NAME.md
+                      sed '/Organization policy check:/{s///;q;}' $TFPLAN_NAME.tfplan >> $TFPLAN_SUMMARY_NAME.md
+                      echo \`\`\` >> $TFPLAN_SUMMARY_NAME.md
+                      echo "##vso[task.addattachment type=Distributedtask.Core.Summary;name=TFPlan-${{ env }};]$TFPLAN_SUMMARY_NAME.md"
+
+                      echo \`\`\`diff > $TFPLAN_SUMMARY_NAME-sentinel.md
+                      sed -n -e '/Organization policy check:/,$p' $TFPLAN_NAME.tfplan >> $TFPLAN_SUMMARY_NAME-sentinel.md
+                      echo \`\`\` >> $TFPLAN_SUMMARY_NAME-sentinel.md
+                      echo "##vso[task.addattachment type=Distributedtask.Core.Summary;name=Sentinel-PolicyCheck-${{ env }};]$TFPLAN_SUMMARY_NAME-sentinel.md"
+                    else
+                      echo \`\`\`diff >> $TFPLAN_SUMMARY_NAME.md
+                      cat $TFPLAN_NAME.tfplan >> $TFPLAN_SUMMARY_NAME.md
+                      echo \`\`\` >> $TFPLAN_SUMMARY_NAME.md
+                      echo "##vso[task.addattachment type=Distributedtask.Core.Summary;name=TFPlan-${{ env }};]$TFPLAN_SUMMARY_NAME.md"
+                    fi
+
+                    if ! grep -q ", 0 to destroy." $TFPLAN_NAME.tfplan;
+                    then
+                      resourceDestructionDetected=true
+                      if [ "$AUTHORIZED_DESTRUCTION" = "True" ]
+                      then
+                        echo "##vso[task.logissue type=warning]*****IMPORTANT: Resource destruction detected in plan and destruction is authorized. Exercise caution when reviewing and approving.*****"
+                      else
+                        status=1
+                        echo "##vso[task.logissue type=error]*****CRITICAL: Resource destruction detected in plan and destruction is not authorized. Pipeline will exit and be blocked from proceeding until destruction is authorized or plan is modified.*****"
+                      fi
+                    fi
+                  else
+                    echo "##vso[task.logissue type=warning]*****Remainder of Plan stage will be skipped as no resource changes were detected.  Apply stage will also be skipped.*****"
+                  fi
+
+                  echo "##vso[task.setvariable variable=resourceChanges;isOutput=true]$resourceChanges"
+                  echo "##vso[task.setvariable variable=resourceDestructionDetected;isOutput=true]$resourceDestructionDetected"
+                  echo "##[command]exit $status"
+                  exit $status
+                displayName: 'terragrunt plan ${{ env }}'  
+                name: tfplan
+                env:
+                  ARM_CLIENT_ID: $(AzureClientId)
+                  ARM_CLIENT_SECRET: $(AzureClientSecret)
+                  ARM_SUBSCRIPTION_ID: $(AzureSubscriptionId)
+                  ARM_TENANT_ID: $(AzureTenantId)
+                  TFPLAN_NAME: $(Build.BinariesDirectory)/$(Build.BuildNumber)
+                  TFPLAN_SUMMARY_NAME: $(Agent.TempDirectory)/$(Build.BuildNumber)
+                  AUTHORIZED_DESTRUCTION: ${{ parameters.authorizeDestructionOfResources }}
+                  USING_TFE_WORKSPACE: ${{ parameters.usingTFEWorkspace }}

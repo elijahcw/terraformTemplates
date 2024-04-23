@@ -1,0 +1,86 @@
+parameters:
+
+  # The directory where the terraform lives
+  - name: terraform_source_path
+    default: 'terraform'
+
+  # A noop flag that can disable this stage
+  - name: dryrun
+    default: false
+
+  - name: terraform_version 
+    default: '0.13.4'
+
+  # List of environments to validate
+  - name: "environments"
+    type: object
+    default: {}
+
+  # Authorize the Destruction of Terraform provisioned resources
+  - name: 'authorizeDestructionOfResources'
+    type: boolean
+    default: false
+
+  # Using TFE Workspace. Set to false if not using TFE for development purposes
+  - name: 'usingTFEWorkspace'
+    type: boolean
+    default: true 
+
+
+
+
+stages:
+  - ${{ each env in parameters.environments }}:
+    - stage: Apply_${{ env }}
+      condition: and(eq(${{ parameters.dryrun }}, false), eq(variables['Build.SourceBranch'], 'refs/heads/${{ env }}'))
+      jobs:
+        - deployment: IacSDLCDeploy${{ env }}
+          displayName: Iac SDLC - Deploy ${{ env }}
+          environment: 'iac-sdlc-${{ env }}'
+          container:
+            image: acrmodelanonprod.azurecr.io/ado-builder-images/docker-linux-terraform-agent:latest
+            endpoint: "ADO-SE-Docker-Registry-Example Spoke CentralUS ModelA SharedNonProd"
+          variables:
+               resourceDestructionDetected: $[ stageDependencies.Plan_${{ env }}.TerraformPlan.outputs['tfplan.resourceDestructionDetected'] ]
+          strategy:
+            runOnce:
+              deploy:
+                steps:
+                  - script: |
+                      if [ $(resourceDestructionDetected) ] && [ ! ${{ parameters.authorizeDestructionOfResources }} ]
+                      then
+                        echo "*****CRITICAL: Resource destruction detected in apply and destruction is not authorized. Pipeline will exit and be blocked from proceeding until destruction is authorized or plan is modified.*****"
+                        echo "##vso[task.logissue type=error]*****CRITICAL: Resource destruction detected in apply and destruction is not authorized. Pipeline will exit and be blocked from proceeding until destruction is authorized or plan is modified.*****" 
+                      fi
+                    displayName: Validate Resource Destruction
+
+    ## TODO: Uncomment after we publish ssh key
+    #           - task: InstallSSHKey@0
+    #             inputs:
+    #               knownHostsEntry: $(known_host_entry)
+    #               sshPublicKey: $(ssh_pub_key)
+    #               sshKeySecureFile: 'Example_ado_pipeline.key'
+
+                   ## Write TFE_TOKEN to terraformrc for authentication
+                  - script: |
+                      echo "credentials \"tfe.Example.com\" { token = \"$TFE_TOKEN\" }" >> ~/.terraformrc
+                    displayName: Setup TFE Credentials
+                    env:
+                      TFE_TOKEN: $(TFETeamToken)
+
+                  - script: |
+                      tfenv use ${{ parameters.terraform_version }}
+                      cd environments/${{ env }}
+                      if [ "$USING_TFE_WORKSPACE" = "True" ]; then
+                        echo "##vso[task.logissue type=warning]*****Preparing to provision resources for the ${{ env }} environment via Terraform Enterprise. Please approve or discard the run in your Terraform Enterprise Workspace (link to your workspace is available the Extensions tab).*****"
+                      fi
+                      terragrunt apply
+                    displayName: 'terragrunt apply ${{ env }}'  
+                    name: tfapply
+                    env:
+                      ARM_CLIENT_ID: $(AzureClientId)
+                      ARM_CLIENT_SECRET: $(AzureClientSecret)
+                      ARM_SUBSCRIPTION_ID: $(AzureSubscriptionId)
+                      ARM_TENANT_ID: $(AzureTenantId)
+                      AUTHORIZED_DESTRUCTION: ${{ parameters.authorizeDestructionOfResources }}
+                      USING_TFE_WORKSPACE: ${{ parameters.usingTFEWorkspace }}

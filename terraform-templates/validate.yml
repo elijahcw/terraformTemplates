@@ -1,0 +1,87 @@
+# Verification for testing terraform
+#
+# This stage performs a few checks
+#   * check to make sure that all terraform is compliant with terraform fmt
+#   * check to make sure that terraform validate succeeds
+#   * run terragrunt validate/plan on every given environment
+
+parameters:
+
+  # The directory where the terraform lives
+  - name: terraform_source_path
+    default: 'terraform'
+
+  # A noop flag that can disable this stage
+  - name: dryrun
+    default: false
+
+  - name: terraform_version 
+    default: '0.13.4'
+
+  # List of environments to validate
+  - name: "environments"
+    type: object
+    default: {}
+
+
+stages:
+  - stage: Validate
+    condition: eq(${{ parameters.dryrun }}, false)
+    jobs:
+      - job: ValidateTerraform
+        container:
+          image: acrmodelanonprod.azurecr.io/ado-builder-images/docker-linux-terraform-agent:latest
+          endpoint: 'ADO-SE-Docker-Registry-Example Spoke CentralUS ModelA SharedNonProd'
+        steps:
+
+## TODO: Uncomment after we publish ssh key
+#           - task: InstallSSHKey@0
+#             inputs:
+#               knownHostsEntry: $(known_host_entry)
+#               sshPublicKey: $(ssh_pub_key)
+#               sshKeySecureFile: 'Example_ado_pipeline.key'
+
+           ## Write TFE_TOKEN to terraformrc for authentication
+           - script: |
+               echo "credentials \"tfe.Example.com\" { token = \"$TFE_TOKEN\" }" >> ~/.terraformrc
+             displayName: Setup TFE Credentials
+             env:
+               TFE_TOKEN: $(TFETeamToken)
+
+           ## Run terraform init, validate and fmt
+           - checkout: self
+           - script: |
+               cd $(Build.Repository.Name)/${{ parameters.terraform_source_path }}
+               tfenv use ${{ parameters.terraform_version }}
+               terraform init
+               terraform validate
+             displayName: 'Validate Terraform'
+
+           - script: |
+               tfenv use ${{ parameters.terraform_version }}
+               terraform fmt -check -recursive -list=false
+               if [ $? -ne 0 ]; then
+                 echo "Terraform format check failed. Please run 'terraform fmt -recursive' to correctly format the following files"
+                 terraform fmt -check -recursive
+               fi
+             displayName: 'Terraform Format'
+              
+
+           ## Download terraform policies from shared repo and validate
+           - checkout: git://GT.ICS-FIT/terraform-policies
+           - script: |
+               tfenv use ${{ parameters.terraform_version }}
+               cp terraform-policies/tflint/tflint.hcl $(Build.Repository.Name)/${{ parameters.terraform_source_path }}/.tflint.hcl
+               cd $(Build.Repository.Name)/${{ parameters.terraform_source_path }}
+               tflint
+             displayName: 'Run tflint'
+
+           # Create loop based on a list of environments from parameter
+           - ${{ each env in parameters.environments }}:
+              - script: |
+                  cd $(Build.Repository.Name)/environments/${{ env }}
+                  tfenv use ${{ parameters.terraform_version }}
+                  terragrunt validate
+                  terragrunt plan
+                displayName: 'Validate Terragrunt ${{ env }}'
+

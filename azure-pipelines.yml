@@ -1,0 +1,43 @@
+pool: AP-UbuntuScaleSet
+
+resources:
+  repositories:
+    - repository: templates
+      type: git
+      name: pipeline-templates
+
+variables:
+  - group: VG-ModelA
+  - name : major
+    value: 1
+  - name : minor
+    value: 0
+  - name: patch
+    value: 0
+
+stages:
+  - template: dry-run.yml
+
+  - stage: TagTemplates
+    condition: eq(variables['Build.SourceBranch'], 'refs/heads/master')
+    jobs:
+      - job: IncrementTag
+        variables:
+          patch: $[counter(variables['minor'], 1)]
+          app_version: '$(major).$(minor).$(patch)'
+          build_timestamp: '$(Date: yyyy-MM-dd HH:mm:ssZ)'
+        steps:
+          - checkout: self
+            persistCredentials: true
+
+          - script: echo "Application version is $(app_version)"
+
+          - script: |
+              git checkout master
+              git pull origin master
+              git config --global user.email "azure-devops@Example.com"
+              git config --global user.name "ADO Agent"
+              git tag -a "$(app_version)" -m "$(build_timestamp)"
+              git push origin "$(app_version)"
+              git tag --force -a "latest"  -m "latest version of the templates"
+              git push --force origin refs/tags/latest
